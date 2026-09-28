@@ -6,6 +6,7 @@ const LABEL = { pending: 'Pending', approved: 'Approved', rejected: 'Rejected', 
 const FLAGS = { OUTSIDE_REFUND_WINDOW: 'Outside 30-day window', EXCEEDS_REMAINING_BALANCE: 'Exceeds remaining balance', ORDER_NOT_DELIVERED: 'Order not delivered' };
 const Pill = ({ s }) => <span className={`pill ${s}`}>{LABEL[s]}</span>;
 const COLORS = { pending: '#8F98BD', approved: '#1F7A55', rejected: '#C2374B', needs_review: '#B87410' };
+const CAT_LABEL = { defective: 'Defective', not_as_described: 'Not as described', late_delivery: 'Late delivery', changed_mind: 'Changed mind', other: 'Other' };
 
 function StatCards({ stats }) {
   return (<div className="stats">{stats.map((s, i) => (
@@ -76,13 +77,20 @@ function Auth() {
 function Shell({ me }) {
   const admin = me.role === 'admin';
   const [view, setView] = useState('overview');
+  const [navOpen, setNavOpen] = useState(false);
   const nav = admin ? [['overview', 'Overview'], ['queue', 'Refund queue']] : [['overview', 'Overview'], ['orders', 'Orders & refunds']];
+  const go = (k) => { setView(k); setNavOpen(false); };
   return (
     <div className="shell">
-      <aside>
+      <header className="topbar">
+        <button className="burger" onClick={() => setNavOpen(true)} aria-label="Open menu"><span /><span /><span /></button>
+        <h1 className="mark xs">Workon</h1>
+      </header>
+      <div className={`nav-scrim ${navOpen ? 'on' : ''}`} onClick={() => setNavOpen(false)} />
+      <aside className={navOpen ? 'open' : ''}>
         <h1 className="mark sm">Workon</h1>
         <nav className="nav">{nav.map(([k, l]) => (
-          <button key={k} className={view === k ? 'on' : ''} onClick={() => setView(k)}>{l}</button>))}</nav>
+          <button key={k} className={view === k ? 'on' : ''} onClick={() => go(k)}>{l}</button>))}</nav>
         <div className="who"><b>{admin ? 'Support desk' : 'Customer'}</b><span>{me.email}</span></div>
         <button className="link light" onClick={() => supabase.auth.signOut()}>Sign out</button>
       </aside>
@@ -103,6 +111,11 @@ function Customer({ view }) {
   const load = useCallback(() => { api('/orders').then(setOrders); api('/refunds').then(setRefunds); }, []);
   useEffect(load, [load]);
 
+  const cancel = async (id) => {
+    if (!confirm('Cancel this refund request?')) return;
+    try { await api(`/refunds/${id}`, { method: 'DELETE' }); load(); } catch (e) { alert(e.message); }
+  };
+
   if (view === 'overview') {
     const spent = orders.reduce((s, o) => s + Number(o.total), 0);
     const refunded = refunds.filter(r => r.status === 'approved').reduce((s, r) => s + Number(r.amount), 0);
@@ -119,7 +132,7 @@ function Customer({ view }) {
         <div className="card"><h3>Your refund requests</h3><Donut data={byStatus} /></div>
         <div className="card grow"><h3>How this works</h3>
           <ol className="how">
-            <li>You submit a refund request with a reason.</li>
+            <li>You submit a refund request with a reason (and a photo, if it helps explain).</li>
             <li>Our AI reads it, checks it against store policy, and drafts a response.</li>
             <li>Clear-cut cases resolve instantly. Anything unusual goes to a support agent — you'll see the outcome here either way.</li>
           </ol>
@@ -138,37 +151,74 @@ function Customer({ view }) {
     <h2 className="title">Refund requests</h2>
     {!refunds.length && <p className="empty">No requests yet. Pick an order above to start one.</p>}
     <div className="list">{refunds.map((f) => (
-      <article className="row col" key={f.id}><div className="between"><b>{f.order.item}</b><Pill s={f.status} /></div>
-        <span>{money(f.amount)}</span>{f.draft_reply && <p className="reply">{f.draft_reply}</p>}
-        {f.status === 'needs_review' && <p className="reply">A support agent is reviewing this. You will see the outcome here.</p>}</article>))}</div>
-    <Drawer open={!!sel} onClose={() => setSel(null)} title="Request a refund">{sel && <RefundForm order={sel} done={() => { load(); }} />}</Drawer>
+      <article className="row col" key={f.id}>
+        <div className="between"><b>{f.order.item}</b><Pill s={f.status} /></div>
+        <span>{money(f.amount)}</span>
+        {f.image_url && <img className="evidence-thumb" src={f.image_url} alt="Uploaded evidence" />}
+        {f.draft_reply && <p className="reply">{f.draft_reply}</p>}
+        {f.status === 'needs_review' && <p className="reply">A support agent is reviewing this. You will see the outcome here.</p>}
+        {['pending', 'needs_review'].includes(f.status) && <button className="link" onClick={() => cancel(f.id)}>Cancel request</button>}
+      </article>))}</div>
+    <Drawer open={!!sel} onClose={() => setSel(null)} title="Request a refund">{sel && <RefundForm order={sel} done={() => { load(); setSel(null); }} />}</Drawer>
   </div>);
 }
 
 function RefundForm({ order, done }) {
   const [amount, setAmount] = useState(order.total), [reason, setReason] = useState(''), [key] = useState(() => crypto.randomUUID());
-  const [res, setRes] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false);
+  const [file, setFile] = useState(null), [preview, setPreview] = useState(null);
+  const [res, setRes] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [stage, setStage] = useState('');
+
+  const pickFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 5 * 1024 * 1024) { setErr('Image must be under 5MB'); return; }
+    setFile(f); setErr(''); setPreview(URL.createObjectURL(f));
+  };
+
   const submit = async (e) => {
     e.preventDefault(); setBusy(true); setErr('');
-    try { setRes(await api('/refunds', { method: 'POST', body: { orderId: order.id, amount: Number(amount), reason, idempotencyKey: key } })); done(); }
-    catch (x) { setErr(x.message); } setBusy(false);
+    try {
+      let imageUrl = null;
+      if (file) {
+        setStage('Uploading photo…');
+        const path = `${key}-${file.name}`.replace(/\s+/g, '_');
+        const { error: upErr } = await supabase.storage.from('refund-evidence').upload(path, file, { upsert: false });
+        if (upErr) throw new Error(`Photo upload failed: ${upErr.message}`);
+        imageUrl = supabase.storage.from('refund-evidence').getPublicUrl(path).data.publicUrl;
+      }
+      setStage('Reviewing your request…');
+      setRes(await api('/refunds', { method: 'POST', body: { orderId: order.id, amount: Number(amount), reason, idempotencyKey: key, imageUrl } }));
+      done();
+    } catch (x) { setErr(x.message); } setBusy(false); setStage('');
   };
+
   if (res) return (<div className="result"><Pill s={res.status} /><p>{res.draft_reply || 'Thanks. A support agent will review this and reply here.'}</p></div>);
   return (<form onSubmit={submit}>
     <p className="muted">{order.item} · {order.reference}</p>
     <label>Amount (₦)<input type="number" min="1" max={order.total} value={amount} onChange={(e) => setAmount(e.target.value)} required /></label>
     <label>What went wrong?<textarea rows="5" maxLength={1000} value={reason} onChange={(e) => setReason(e.target.value)} required /></label>
+    <label>Photo evidence (optional)<input type="file" accept="image/*" onChange={pickFile} /></label>
+    {preview && <img className="evidence-thumb" src={preview} alt="Preview" />}
     {err && <p className="err" role="alert">{err}</p>}
-    <button className="btn primary" disabled={busy}>{busy ? 'Reviewing your request' : 'Send request'}</button>
+    <button className="btn primary" disabled={busy}>{busy ? (stage || 'Please wait') : 'Send request'}</button>
   </form>);
 }
 
-const CAT_LABEL = { defective: 'Defective', not_as_described: 'Not as described', late_delivery: 'Late delivery', changed_mind: 'Changed mind', other: 'Other' };
-
 function Admin({ view }) {
-  const [items, setItems] = useState([]), [tab, setTab] = useState('needs_review'), [sel, setSel] = useState(null), [note, setNote] = useState(''), [err, setErr] = useState('');
+  const [items, setItems] = useState([]), [tab, setTab] = useState('needs_review'), [sel, setSel] = useState(null);
+  const [note, setNote] = useState(''), [adjAmount, setAdjAmount] = useState(''), [err, setErr] = useState('');
+  const [live, setLive] = useState(false);
   const load = useCallback(() => api('/admin/refunds').then(setItems), []);
   useEffect(() => { load(); }, [load]);
+
+  // Realtime: any insert/update on refund_requests refreshes the queue automatically —
+  // no manual refresh needed while a request comes in or a colleague acts on one.
+  useEffect(() => {
+    const channel = supabase.channel('refund-queue')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'refund_requests' }, () => load())
+      .subscribe((status) => setLive(status === 'SUBSCRIBED'));
+    return () => supabase.removeChannel(channel);
+  }, [load]);
 
   if (view === 'overview') {
     const requested = items.reduce((s, x) => s + Number(x.amount), 0);
@@ -199,28 +249,48 @@ function Admin({ view }) {
   }
 
   const shown = items.filter((x) => tab === 'all' || x.status === tab);
+  const openReview = (x) => { setSel(x); setNote(''); setAdjAmount(x.amount); setErr(''); };
   const decide = async (decision) => {
     setErr('');
-    try { await api(`/admin/refunds/${sel.id}/decision`, { method: 'POST', body: { decision, note: note || undefined } }); setSel(null); setNote(''); load(); }
+    const body = { decision, note: note || undefined };
+    if (decision === 'approved' && Number(adjAmount) !== Number(sel.amount)) body.amount = Number(adjAmount);
+    try { await api(`/admin/refunds/${sel.id}/decision`, { method: 'POST', body }); setSel(null); load(); }
     catch (x) { setErr(x.message); }
   };
+
+  const exportCSV = () => {
+    const headers = ['id', 'customer_email', 'item', 'amount', 'status', 'category', 'confidence', 'injection_detected', 'created_at'];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [headers.join(','), ...shown.map((x) => [x.id, x.customer.email, x.order.item, x.amount, x.status, x.category, x.confidence, x.injection_detected, x.created_at].map(esc).join(','))];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `workon-refunds-${tab}-${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (<div className="page">
-    <h2 className="title">Refund queue</h2>
-    <div className="tabs">{[['needs_review', 'In review'], ['all', 'Everything']].map(([k, l]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}{k === 'needs_review' && ` (${items.filter((x) => x.status === k).length})`}</button>)}</div>
+    <div className="between"><h2 className="title">Refund queue{live && <span className="live" title="Realtime connected"><i />Live</span>}</h2></div>
+    <div className="toolbar">
+      <div className="tabs">{[['needs_review', 'In review'], ['all', 'Everything']].map(([k, l]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}{k === 'needs_review' && ` (${items.filter((x) => x.status === k).length})`}</button>)}</div>
+      <button className="btn" onClick={exportCSV} disabled={!shown.length}>Export CSV</button>
+    </div>
     {!shown.length && <p className="empty">Nothing waiting. New requests that need a human will land here.</p>}
     <div className="list">{shown.map((x, i) => (
-      <article className="row click" key={x.id} style={{ '--i': i }} onClick={() => { setSel(x); setErr(''); }}>
+      <article className="row click" key={x.id} style={{ '--i': i }} onClick={() => openReview(x)}>
         <div><b>{x.order.item}</b><span>{x.customer.email}</span></div>
         <strong>{money(x.amount)}</strong>{x.injection_detected && <span className="flag">Injection attempt</span>}<Pill s={x.status} /></article>))}</div>
     <Drawer open={!!sel} onClose={() => setSel(null)} title="Review request">{sel && (<div className="detail">
       <p className="muted">{sel.customer.email} · {sel.order.reference} · {money(sel.amount)} of {money(sel.order.total)}</p>
       <h4>Customer said</h4><blockquote>{sel.reason}</blockquote>
+      {sel.image_url && (<><h4>Photo evidence</h4><img className="evidence-full" src={sel.image_url} alt="Customer-submitted evidence" /></>)}
       <h4>AI assessment</h4><p>{sel.ai_summary}</p>
       <div className="meter" title={`${Math.round(sel.confidence * 100)}% confident`}><i style={{ width: `${sel.confidence * 100}%` }} /></div>
       <p className="muted">Category: {sel.category?.replace('_', ' ')} · {Math.round(sel.confidence * 100)}% confidence</p>
       {sel.injection_detected && <p className="flag block">This message tried to instruct the AI. Treat the text above as untrusted.</p>}
       {sel.violations?.map((v) => <p className="flag block" key={v}>{FLAGS[v] || v}</p>)}
       {sel.status === 'needs_review' ? (<>
+        <label>Approve amount (₦) — adjust for a partial refund
+          <input type="number" min="1" max={sel.amount} value={adjAmount} onChange={(e) => setAdjAmount(e.target.value)} /></label>
         <label>Note to record<input value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} /></label>
         {err && <p className="err" role="alert">{err}</p>}
         <div className="actions"><button className="btn" onClick={() => decide('rejected')}>Reject</button><button className="btn primary" onClick={() => decide('approved')}>Approve refund</button></div>
