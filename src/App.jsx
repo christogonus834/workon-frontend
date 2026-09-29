@@ -164,6 +164,7 @@ function Customer({ view }) {
 }
 
 function RefundForm({ order, done }) {
+  const [category, setCategory] = useState('defective');
   const [amount, setAmount] = useState(order.total), [reason, setReason] = useState(''), [key] = useState(() => crypto.randomUUID());
   const [file, setFile] = useState(null), [preview, setPreview] = useState(null);
   const [res, setRes] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [stage, setStage] = useState('');
@@ -187,7 +188,10 @@ function RefundForm({ order, done }) {
         imageUrl = supabase.storage.from('refund-evidence').getPublicUrl(path).data.publicUrl;
       }
       setStage('Reviewing your request…');
-      setRes(await api('/refunds', { method: 'POST', body: { orderId: order.id, amount: Number(amount), reason, idempotencyKey: key, imageUrl } }));
+      // The category the customer picks is folded straight into the text the AI reads —
+      // a stronger signal than making the AI guess the category from prose alone.
+      const fullReason = `Reason category selected by customer: ${CAT_LABEL[category]}.\n${reason}`;
+      setRes(await api('/refunds', { method: 'POST', body: { orderId: order.id, amount: Number(amount), reason: fullReason, idempotencyKey: key, imageUrl } }));
       done();
     } catch (x) { setErr(x.message); } setBusy(false); setStage('');
   };
@@ -195,8 +199,13 @@ function RefundForm({ order, done }) {
   if (res) return (<div className="result"><Pill s={res.status} /><p>{res.draft_reply || 'Thanks. A support agent will review this and reply here.'}</p></div>);
   return (<form onSubmit={submit}>
     <p className="muted">{order.item} · {order.reference}</p>
+    <label>What kind of issue is this?
+      <select value={category} onChange={(e) => setCategory(e.target.value)}>
+        {Object.entries(CAT_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+    </label>
     <label>Amount (₦)<input type="number" min="1" max={order.total} value={amount} onChange={(e) => setAmount(e.target.value)} required /></label>
-    <label>What went wrong?<textarea rows="5" maxLength={1000} value={reason} onChange={(e) => setReason(e.target.value)} required /></label>
+    <label>Tell us more<textarea rows="5" maxLength={1000} value={reason} onChange={(e) => setReason(e.target.value)} required placeholder="What went wrong, and what would you like us to do?" /></label>
     <label>Photo evidence (optional)<input type="file" accept="image/*" onChange={pickFile} /></label>
     {preview && <img className="evidence-thumb" src={preview} alt="Preview" />}
     {err && <p className="err" role="alert">{err}</p>}
