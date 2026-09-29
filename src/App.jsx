@@ -306,8 +306,15 @@ const emptyOrder = { userId: '', reference: '', item: '', total: '', status: 'de
 
 function OrdersPanel() {
   const [orders, setOrders] = useState([]), [customers, setCustomers] = useState([]), [form, setForm] = useState(null), [err, setErr] = useState('');
-  const load = useCallback(() => { api('/admin/orders').then(setOrders); api('/admin/customers').then(setCustomers); }, []);
+  const [loadErr, setLoadErr] = useState('');
+  const load = useCallback(() => {
+    setLoadErr('');
+    Promise.all([api('/admin/orders'), api('/admin/customers')]).then(([o, c]) => { setOrders(o); setCustomers(c); })
+      .catch((e) => setLoadErr(e.message || 'Could not load orders. Is the backend deployed with this feature?'));
+  }, []);
   useEffect(load, [load]);
+
+  if (loadErr) return (<div className="page"><h2 className="title">Orders</h2><p className="err">{loadErr}</p><button className="btn" onClick={load}>Retry</button></div>);
 
   const openNew = () => { setForm({ ...emptyOrder, userId: customers[0]?.id || '' }); setErr(''); };
   const openEdit = (o) => { setForm({ id: o.id, userId: o.user_id, reference: o.reference, item: o.item, total: o.total, status: o.status, deliveredAt: o.delivered_at?.slice(0, 10) || '' }); setErr(''); };
@@ -359,7 +366,8 @@ function OrdersPanel() {
 
 function SettingsPanel() {
   const [s, setS] = useState(null), [err, setErr] = useState(''), [saved, setSaved] = useState(false), [probing, setProbing] = useState(false), [probe, setProbeResult] = useState(null);
-  const load = useCallback(() => api('/admin/settings').then(setS), []);
+  const [loadErr, setLoadErr] = useState('');
+  const load = useCallback(() => { setLoadErr(''); api('/admin/settings').then(setS).catch((e) => setLoadErr(e.message || 'Could not load settings. Is the backend deployed with this feature?')); }, []);
   useEffect(load, [load]);
 
   const save = async (e) => {
@@ -372,7 +380,8 @@ function SettingsPanel() {
   const reset = async () => { if (confirm('Reset to default policy and thresholds?')) { await api('/admin/settings/reset', { method: 'POST' }); load(); } };
   const testAI = async () => { setProbing(true); setProbeResult(null); try { setProbeResult(await api('/admin/ai/probe')); } catch (x) { setProbeResult({ error: x.message }); } setProbing(false); };
 
-  if (!s) return null;
+  if (loadErr) return (<div className="page"><h2 className="title">Store settings</h2><p className="err">{loadErr}</p><button className="btn" onClick={load}>Retry</button></div>);
+  if (!s) return <div className="page"><p className="muted">Loading…</p></div>;
   return (<div className="page">
     <h2 className="title">Store settings</h2>
     <div className="card">
