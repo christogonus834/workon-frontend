@@ -2,8 +2,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { supabase, api } from './api';
 
 const money = (n) => '₦' + Number(n).toLocaleString();
-const LABEL = { pending: 'Pending', approved: 'Approved', rejected: 'Rejected', needs_review: 'In review' };
-const FLAGS = { OUTSIDE_REFUND_WINDOW: 'Outside 30-day window', EXCEEDS_REMAINING_BALANCE: 'Exceeds remaining balance', ORDER_NOT_DELIVERED: 'Order not delivered' };
+const LABEL = { pending: 'Pending', approved: 'Approved', rejected: 'Denied', needs_review: 'Escalated' };
+const FLAGS = { FINAL_SALE_ITEM: 'Final sale item', OUTSIDE_REFUND_WINDOW: 'Outside refund window', EXCEEDS_REMAINING_BALANCE: 'Exceeds remaining balance', ORDER_NOT_DELIVERED: 'Order not delivered' };
 const Pill = ({ s }) => <span className={`pill ${s}`}>{LABEL[s]}</span>;
 const COLORS = { pending: '#8F98BD', approved: '#1F7A55', rejected: '#C2374B', needs_review: '#B87410' };
 const CAT_LABEL = { defective: 'Defective', not_as_described: 'Not as described', late_delivery: 'Late delivery', changed_mind: 'Changed mind', other: 'Other' };
@@ -145,7 +145,7 @@ function Customer({ view }) {
     <h2 className="title">Your orders</h2>
     <div className="list">{orders.map((o, i) => (
       <article className="row" key={o.id} style={{ '--i': i }}>
-        <div><b>{o.item}</b><span>{o.reference} · delivered {new Date(o.delivered_at).toLocaleDateString()}</span></div>
+        <div><b>{o.item}</b>{o.is_final_sale && <span className="flag" style={{ marginLeft: '.5rem' }}>Final sale</span>}<span>{o.reference} · delivered {new Date(o.delivered_at).toLocaleDateString()}</span></div>
         <strong>{money(o.total)}</strong><button className="btn" onClick={() => setSel(o)}>Request refund</button>
       </article>))}</div>
     <h2 className="title">Refund requests</h2>
@@ -156,7 +156,7 @@ function Customer({ view }) {
         <span>{money(f.amount)}</span>
         {f.image_url && <img className="evidence-thumb" src={f.image_url} alt="Uploaded evidence" />}
         {f.draft_reply && <p className="reply">{f.draft_reply}</p>}
-        {f.status === 'needs_review' && <p className="reply">A support agent is reviewing this. You will see the outcome here.</p>}
+        {f.status === 'needs_review' && <p className="reply">Our AI reviewed this and flagged it for a support agent to make the final call. You'll see the outcome here.</p>}
         {['pending', 'needs_review'].includes(f.status) && <button className="link" onClick={() => cancel(f.id)}>Cancel request</button>}
       </article>))}</div>
     <Drawer open={!!sel} onClose={() => setSel(null)} title="Request a refund">{sel && <RefundForm order={sel} done={() => { load(); setSel(null); }} />}</Drawer>
@@ -196,7 +196,7 @@ function RefundForm({ order, done }) {
     } catch (x) { setErr(x.message); } setBusy(false); setStage('');
   };
 
-  if (res) return (<div className="result"><Pill s={res.status} /><p>{res.draft_reply || 'Thanks. A support agent will review this and reply here.'}</p></div>);
+  if (res) return (<div className="result"><Pill s={res.status} /><p>{res.draft_reply || "Our AI reviewed this and flagged it for a support agent to make the final call. You'll see the outcome here."}</p></div>);
   return (<form onSubmit={submit}>
     <p className="muted">{order.item} · {order.reference}</p>
     <label>What kind of issue is this?
@@ -311,7 +311,7 @@ function Admin({ view }) {
   </div>);
 }
 
-const emptyOrder = { userId: '', reference: '', item: '', total: '', status: 'delivered', deliveredAt: '' };
+const emptyOrder = { userId: '', reference: '', item: '', total: '', status: 'delivered', deliveredAt: '', isFinalSale: false };
 
 function OrdersPanel() {
   const [orders, setOrders] = useState([]), [customers, setCustomers] = useState([]), [form, setForm] = useState(null), [err, setErr] = useState('');
@@ -326,13 +326,14 @@ function OrdersPanel() {
   if (loadErr) return (<div className="page"><h2 className="title">Orders</h2><p className="err">{loadErr}</p><button className="btn" onClick={load}>Retry</button></div>);
 
   const openNew = () => { setForm({ ...emptyOrder, userId: customers[0]?.id || '' }); setErr(''); };
-  const openEdit = (o) => { setForm({ id: o.id, userId: o.user_id, reference: o.reference, item: o.item, total: o.total, status: o.status, deliveredAt: o.delivered_at?.slice(0, 10) || '' }); setErr(''); };
+  const openEdit = (o) => { setForm({ id: o.id, userId: o.user_id, reference: o.reference, item: o.item, total: o.total, status: o.status, deliveredAt: o.delivered_at?.slice(0, 10) || '', isFinalSale: !!o.is_final_sale }); setErr(''); };
 
   const save = async (e) => {
     e.preventDefault(); setErr('');
     const body = {
       userId: form.userId, reference: form.reference, item: form.item, total: Number(form.total), status: form.status,
       deliveredAt: form.deliveredAt ? new Date(form.deliveredAt).toISOString() : undefined,
+      isFinalSale: form.isFinalSale,
     };
     try {
       if (form.id) await api(`/admin/orders/${form.id}`, { method: 'PUT', body });
@@ -350,7 +351,7 @@ function OrdersPanel() {
     {!customers.length && <p className="empty">No customer accounts yet — have someone sign up first, then create orders for them here.</p>}
     <div className="list">{orders.map((o, i) => (
       <article className="row" key={o.id} style={{ '--i': i }}>
-        <div><b>{o.item}</b><span>{o.reference} · {o.customer?.email} · delivered {new Date(o.delivered_at).toLocaleDateString()}</span></div>
+        <div><b>{o.item}</b>{o.is_final_sale && <span className="flag" style={{ marginLeft: '.5rem' }}>Final sale</span>}<span>{o.reference} · {o.customer?.email} · delivered {new Date(o.delivered_at).toLocaleDateString()}</span></div>
         <strong>{money(o.total)}</strong>
         <span className={`pill ${o.status === 'delivered' ? 'approved' : o.status === 'cancelled' ? 'rejected' : 'needs_review'}`}>{o.status}</span>
         <button className="btn" onClick={() => openEdit(o)}>Edit</button>
@@ -366,6 +367,7 @@ function OrdersPanel() {
         <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
           <option value="delivered">Delivered</option><option value="processing">Processing</option><option value="cancelled">Cancelled</option></select></label>
         <label>Delivered on<input type="date" value={form.deliveredAt} onChange={(e) => setForm({ ...form, deliveredAt: e.target.value })} /></label>
+        <label className="checkline"><input type="checkbox" checked={form.isFinalSale} onChange={(e) => setForm({ ...form, isFinalSale: e.target.checked })} /> Final sale item (not eligible for refund)</label>
         {err && <p className="err" role="alert">{err}</p>}
         <div className="actions"><button type="button" className="btn" onClick={() => setForm(null)}>Cancel</button><button className="btn primary">{form.id ? 'Save changes' : 'Create order'}</button></div>
       </form>)}
