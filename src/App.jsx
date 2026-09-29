@@ -78,7 +78,7 @@ function Shell({ me }) {
   const admin = me.role === 'admin';
   const [view, setView] = useState('overview');
   const [navOpen, setNavOpen] = useState(false);
-  const nav = admin ? [['overview', 'Overview'], ['queue', 'Refund queue']] : [['overview', 'Overview'], ['orders', 'Orders & refunds']];
+  const nav = admin ? [['overview', 'Overview'], ['queue', 'Refund queue'], ['orders', 'Orders'], ['settings', 'Settings']] : [['overview', 'Overview'], ['orders', 'Orders & refunds']];
   const go = (k) => { setView(k); setNavOpen(false); };
   return (
     <div className="shell">
@@ -248,6 +248,9 @@ function Admin({ view }) {
     </div>);
   }
 
+  if (view === 'orders') return <OrdersPanel />;
+  if (view === 'settings') return <SettingsPanel />;
+
   const shown = items.filter((x) => tab === 'all' || x.status === tab);
   const openReview = (x) => { setSel(x); setNote(''); setAdjAmount(x.amount); setErr(''); };
   const decide = async (decision) => {
@@ -296,5 +299,108 @@ function Admin({ view }) {
         <div className="actions"><button className="btn" onClick={() => decide('rejected')}>Reject</button><button className="btn primary" onClick={() => decide('approved')}>Approve refund</button></div>
       </>) : <Pill s={sel.status} />}
     </div>)}</Drawer>
+  </div>);
+}
+
+const emptyOrder = { userId: '', reference: '', item: '', total: '', status: 'delivered', deliveredAt: '' };
+
+function OrdersPanel() {
+  const [orders, setOrders] = useState([]), [customers, setCustomers] = useState([]), [form, setForm] = useState(null), [err, setErr] = useState('');
+  const load = useCallback(() => { api('/admin/orders').then(setOrders); api('/admin/customers').then(setCustomers); }, []);
+  useEffect(load, [load]);
+
+  const openNew = () => { setForm({ ...emptyOrder, userId: customers[0]?.id || '' }); setErr(''); };
+  const openEdit = (o) => { setForm({ id: o.id, userId: o.user_id, reference: o.reference, item: o.item, total: o.total, status: o.status, deliveredAt: o.delivered_at?.slice(0, 10) || '' }); setErr(''); };
+
+  const save = async (e) => {
+    e.preventDefault(); setErr('');
+    const body = {
+      userId: form.userId, reference: form.reference, item: form.item, total: Number(form.total), status: form.status,
+      deliveredAt: form.deliveredAt ? new Date(form.deliveredAt).toISOString() : undefined,
+    };
+    try {
+      if (form.id) await api(`/admin/orders/${form.id}`, { method: 'PUT', body });
+      else await api('/admin/orders', { method: 'POST', body });
+      setForm(null); load();
+    } catch (x) { setErr(x.message); }
+  };
+  const remove = async (id) => {
+    if (!confirm('Delete this order? This only works if it has no refund requests.')) return;
+    try { await api(`/admin/orders/${id}`, { method: 'DELETE' }); load(); } catch (x) { alert(x.message); }
+  };
+
+  return (<div className="page">
+    <div className="toolbar"><h2 className="title">Orders</h2><button className="btn primary" onClick={openNew} disabled={!customers.length}>+ New order</button></div>
+    {!customers.length && <p className="empty">No customer accounts yet — have someone sign up first, then create orders for them here.</p>}
+    <div className="list">{orders.map((o, i) => (
+      <article className="row" key={o.id} style={{ '--i': i }}>
+        <div><b>{o.item}</b><span>{o.reference} · {o.customer?.email} · delivered {new Date(o.delivered_at).toLocaleDateString()}</span></div>
+        <strong>{money(o.total)}</strong>
+        <span className={`pill ${o.status === 'delivered' ? 'approved' : o.status === 'cancelled' ? 'rejected' : 'needs_review'}`}>{o.status}</span>
+        <button className="btn" onClick={() => openEdit(o)}>Edit</button>
+        <button className="link" onClick={() => remove(o.id)}>Delete</button>
+      </article>))}</div>
+    <Drawer open={!!form} onClose={() => setForm(null)} title={form?.id ? 'Edit order' : 'New order'}>
+      {form && (<form onSubmit={save}>
+        <label>Customer<select value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })} required>
+          {customers.map(c => <option key={c.id} value={c.id}>{c.email}</option>)}</select></label>
+        <label>Reference<input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} required /></label>
+        <label>Item<input value={form.item} onChange={(e) => setForm({ ...form, item: e.target.value })} required /></label>
+        <label>Total (₦)<input type="number" min="1" value={form.total} onChange={(e) => setForm({ ...form, total: e.target.value })} required /></label>
+        <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+          <option value="delivered">Delivered</option><option value="processing">Processing</option><option value="cancelled">Cancelled</option></select></label>
+        <label>Delivered on<input type="date" value={form.deliveredAt} onChange={(e) => setForm({ ...form, deliveredAt: e.target.value })} /></label>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="actions"><button type="button" className="btn" onClick={() => setForm(null)}>Cancel</button><button className="btn primary">{form.id ? 'Save changes' : 'Create order'}</button></div>
+      </form>)}
+    </Drawer>
+  </div>);
+}
+
+function SettingsPanel() {
+  const [s, setS] = useState(null), [err, setErr] = useState(''), [saved, setSaved] = useState(false), [probing, setProbing] = useState(false), [probe, setProbeResult] = useState(null);
+  const load = useCallback(() => api('/admin/settings').then(setS), []);
+  useEffect(load, [load]);
+
+  const save = async (e) => {
+    e.preventDefault(); setErr(''); setSaved(false);
+    try {
+      await api('/admin/settings', { method: 'PUT', body: { window_days: Number(s.window_days), auto_approve_max: Number(s.auto_approve_max), min_confidence: Number(s.min_confidence), policy_text: s.policy_text } });
+      setSaved(true); setTimeout(() => setSaved(false), 2500);
+    } catch (x) { setErr(x.message); }
+  };
+  const reset = async () => { if (confirm('Reset to default policy and thresholds?')) { await api('/admin/settings/reset', { method: 'POST' }); load(); } };
+  const testAI = async () => { setProbing(true); setProbeResult(null); try { setProbeResult(await api('/admin/ai/probe')); } catch (x) { setProbeResult({ error: x.message }); } setProbing(false); };
+
+  if (!s) return null;
+  return (<div className="page">
+    <h2 className="title">Store settings</h2>
+    <div className="card">
+      <h3>AI provider health</h3>
+      <p className="muted">Pings every configured Gemini and Groq model directly and reports the real error for each — the same chain a live refund request uses.</p>
+      <button className="btn" onClick={testAI} disabled={probing}>{probing ? 'Testing…' : 'Test AI'}</button>
+      {probe && !probe.error && (<>
+        <p className="muted" style={{ marginTop: '.8rem' }}>Gemini key: {probe.keys.gemini ? 'present' : 'missing'} · Groq key: {probe.keys.groq ? 'present' : 'missing'}</p>
+        <div className="list" style={{ marginTop: '.6rem' }}>{probe.results.map((r) => (
+          <div className="row" key={r.provider + r.model}>
+            <div><b>{r.provider} / {r.model}</b>{!r.ok && <span style={{ color: 'var(--rose)', fontSize: '.8rem', display: 'block' }}>{r.error}</span>}</div>
+            <span className={`pill ${r.ok ? 'approved' : 'rejected'}`}>{r.ok ? `OK · ${r.ms}ms` : 'Failed'}</span>
+          </div>))}
+        {!probe.results.length && <p className="empty">No API keys configured on the backend yet.</p>}</div>
+      </>)}
+      {probe?.error && <p className="err">{probe.error}</p>}
+    </div>
+    <form className="card" onSubmit={save}>
+      <h3>Refund policy — read by the AI on every request</h3>
+      <label>Policy text<textarea rows="5" maxLength={4000} value={s.policy_text} onChange={(e) => setS({ ...s, policy_text: e.target.value })} required /></label>
+      <div className="grid2">
+        <label>Refund window (days)<input type="number" min="1" max="365" value={s.window_days} onChange={(e) => setS({ ...s, window_days: e.target.value })} required /></label>
+        <label>Auto-approve limit (₦)<input type="number" min="0" value={s.auto_approve_max} onChange={(e) => setS({ ...s, auto_approve_max: e.target.value })} required /></label>
+        <label>Minimum AI confidence (0–1)<input type="number" min="0" max="1" step="0.05" value={s.min_confidence} onChange={(e) => setS({ ...s, min_confidence: e.target.value })} required /></label>
+      </div>
+      {err && <p className="err" role="alert">{err}</p>}
+      {saved && <p className="muted" style={{ color: 'var(--moss)' }}>Saved. New requests use these rules immediately.</p>}
+      <div className="actions"><button type="button" className="link" onClick={reset}>Reset to defaults</button><button className="btn primary">Save settings</button></div>
+    </form>
   </div>);
 }
